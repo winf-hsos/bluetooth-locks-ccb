@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 
 from bleak import BleakClient
 
@@ -7,11 +8,22 @@ async def unlock(mac_address):
     # Connect to client
     client = await connect(mac_address)
 
+    print(f"Connected: { client.is_connected }")
+    
+    # Send date to speed up
+    dateTimeObj = datetime.now()
+    date = bytes([dateTimeObj.second, dateTimeObj.minute, dateTimeObj.hour, dateTimeObj.day, dateTimeObj.year % 100])
+
+    print(f"Sending date")
+    await client.write_gatt_char("4d4f4445-5343-4f2d-574f-524a45523033", data = date)
+
     # User code is in ASCII numbers
     # TODO: Replace with correct user code in ASCII numbers
     # See: https://www.asciitable.com/
     code = bytes([49, 51, 48, 57, 48, 48, 49])
     
+    print(f"Unlocking")
+
     # Write data to characteristic
     await client.write_gatt_char("4d4f4445-5343-4f2d-574f-524a45523032", data = code)
 

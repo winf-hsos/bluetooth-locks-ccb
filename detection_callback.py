@@ -21,6 +21,8 @@ def simple_callback(device: BLEDevice, advertisement_data: AdvertisementData):
         logger.info(f"Lock state: {list(adv_bytes)[3]}")
         logger.info(f"Door state: {list(adv_bytes)[4]}")
         logger.info(f"Open time: {list(adv_bytes)[6]}")
+    else:
+        logger.info(device)
 
 
 async def main(service_uuids):
