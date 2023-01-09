@@ -11,13 +11,56 @@ logging.basicConfig(
         format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s",
     )
 
-# Global variable to check whether status has been retrieved successfully
-status_retrieved = False
+scan_task = None
+devices = {}
+devices_status = {}
 
-async def _unlock(mac_address):
+def _device_detected(device: BLEDevice, advertisement_data: AdvertisementData):
 
+    logger.debug(f"Device detected: {device}")
+
+    global devices
+    if(device.name == "PSLOCK"):
+        logger.debug(f"Found PSLOCK: { device.address}")
+
+        if not device.address in devices:
+            logger.debug(f"Device { device.address} is not in list yet. Adding it.")    
+        else:
+            logger.debug(f"Device { device.address} is already in list. Refreshing it.")    
+
+        devices[device.address] = device
+
+
+        adv_bytes = advertisement_data.manufacturer_data.get(65535)
+        status = {}
+        status["timestamp"] = datetime.now()
+        status["battery_level"] = list(adv_bytes)[0]
+        status["lock_state"] = list(adv_bytes)[3]
+        status["door_state"] = list(adv_bytes)[4]
+        status["open_time"] = list(adv_bytes)[6]
+
+        devices_status[device.address] = status
+    else:
+        logger.debug(f"Found a device that is not a PSLOCK: { device.name }")
+
+async def _start_continuous_scan():
+    scanner = BleakScanner(_device_detected, service_uuids=["4d4f4445-5343-4f2d-574f-514b45523232"])
+
+    while True:
+        logger.debug("(re)starting scanner")
+        await scanner.start()
+        await asyncio.sleep(10.0)
+        await scanner.stop()
+    
+async def _unlock(mac_address, user_code = "1234"):
     try:
-        async with BleakClient(mac_address, timeout = 10) as client:
+        global devices
+        if(mac_address in devices):
+            client = BleakClient(devices.get(mac_address))
+        else:
+            client = BleakClient(mac_address, timeout = 10)
+
+        async with client:
         
             dateTimeObj = datetime.now()
             date = bytes([dateTimeObj.second, dateTimeObj.minute, dateTimeObj.hour, dateTimeObj.day, dateTimeObj.year % 100])
@@ -27,7 +70,7 @@ async def _unlock(mac_address):
             # User code is in ASCII numbers
             # TODO: Replace with correct user code in ASCII numbers
             # See: https://www.asciitable.com/
-            code = bytes([49, 51, 48, 57, 48, 48, 49])
+            code = bytes([ord(user_code[0]), ord(user_code[1]), ord(user_code[2]), ord(user_code[3]), 48, 48, 49])
             
             # Write data to characteristic
             await client.write_gatt_char("4d4f4445-5343-4f2d-574f-524a45523032", data = code)
@@ -38,86 +81,35 @@ async def _unlock(mac_address):
         logger.debug(ex)
         return False
 
-async def get_lock_status(mac_address):
-
-    global status_retrieved
-    status_retrieved = False
+def get_lock_status(mac_address):
+    status = devices_status.get(mac_address)
     
-    status = {}
-
-    def detection_callback(device: BLEDevice, advertisement_data: AdvertisementData):
-        if(device.name == "PSLOCK" and device.address == mac_address):
-            logger.debug(f"{device.address}")
-            logger.debug(advertisement_data.manufacturer_data)
-
-            adv_bytes = advertisement_data.manufacturer_data.get(65535)
-            logger.debug(list(adv_bytes))
-            logger.debug(f"Battery level: {list(adv_bytes)[0]} %")
-            logger.debug(f"Lock state: {list(adv_bytes)[3]}")
-            logger.debug(f"Door state: {list(adv_bytes)[4]}")
-            logger.debug(f"Open time: {list(adv_bytes)[6]}")
-
-            status["battery_level"] = list(adv_bytes)[0]
-            status["lock_state"] = list(adv_bytes)[3]
-            status["door_state"] = list(adv_bytes)[4]
-            status["open_time"] = list(adv_bytes)[6]
-
-            global status_retrieved
-            status_retrieved = True
-
-    scanner = BleakScanner(detection_callback, ["4d4f4445-5343-4f2d-574f-514b45523232"])
+    if status == None:
+        logger.error(f"Device { mac_address } not found (yet).")
     
-    while not status_retrieved:
-        logger.debug("(re)starting scanner")
-        await scanner.start()
-        await asyncio.sleep(5.0)
-        await scanner.stop()
-        
     return status
 
-async def unlock(mac_address, num_retries = 5):
+async def unlock(mac_address, user_code = "1234", num_retries = 1):
     
     retries = 0
     success = False
-    while(not success or retries >= num_retries):
+    while(not success or retries < num_retries):
         retries = retries + 1 
         logger.debug(f"Attempt {retries} to open the lock.")
-        success = await _unlock(mac_address)
+        success = await _unlock(mac_address, user_code)
     
     if(not success):
-        logger.error(f"Unable to open lock within {num_retries} attempts.")
+        logger.error(f"Unable to open lock { mac_address } within {num_retries} attempts.")
 
     return success
-    
-# Main entry into the user prompt
-async def main():
 
-    prompt = ""
-    while(prompt != "exit"):
-        prompt = input("Please type a command (unlock, status, exit): ")
+async def start(device_name = "PSLOCK"):
+    scan = _start_continuous_scan()
 
-        if(prompt == "unlock"):
+    global scan_task
+    scan_task = asyncio.create_task(scan)
+    await asyncio.sleep(0)
 
-            mac_address = input("Enter mac-address (default: DE:44:38:02:AA:EA): ")
-            if mac_address == "":
-                mac_address = "DE:44:38:02:AA:EA"
-
-            print(f"Unlocking {mac_address}")
-            result = await unlock(mac_address)
-            print(f"Unlock successful? { result }")
-
-        elif(prompt == "status"):
-
-            mac_address = input("Enter mac-address (default: DE:44:38:02:AA:EA): ")
-            if mac_address == "":
-                mac_address = "DE:44:38:02:AA:EA"
-            
-            print(f"Retrieving status for {mac_address}")
-            status = await get_lock_status(mac_address)
-            print(f"Status: {status}")
-
-        elif(prompt == "exit"):
-            print("Bye bye!")
-
-
-asyncio.run(main())
+def stop():
+    global scan_task
+    scan_task.cancel() 
